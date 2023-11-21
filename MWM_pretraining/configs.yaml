@@ -92,7 +92,6 @@ dmc_vision_pretrain:
   kl.free: 1.0
 
 somethingv2:
-  load_logdir: /home/hchen/processed_somethingv2/
   task: dmc_walker_walk
   replay: {minlen: 50, maxlen: 50}
   dataset: {batch: 16, length: 50}
