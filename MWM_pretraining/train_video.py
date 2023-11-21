@@ -36,9 +36,9 @@ def main():
     parsed, remaining = common.Flags(configs=["defaults"]).parse(known_only=True)
     config = common.Config(configs["defaults"])
 
-    # for name in parsed.configs:
-    #     config = config.update(configs[name])
-    config = config.update(configs["somethingv2"])
+    for name in parsed.configs:
+        config = config.update(configs[name])
+    # config = config.update(configs["somethingv2"])
 
     config = common.Flags(config).parse(remaining)
 

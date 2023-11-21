@@ -94,3 +94,13 @@ dmc_vision_pretrain:
 somethingv2:
   load_logdir: /home/hchen/processed_somethingv2/
   task: dmc_walker_walk
+  replay: {minlen: 50, maxlen: 50}
+  dataset: {batch: 16, length: 50}
+  mae_dataset: {batch: 32, length: 32}
+  action_repeat: 1
+  steps: 5e7
+  log_every: 100
+  train_every: 1
+  grad_heads: [decoder]
+  model_opt.lr: 3e-4
+  loss_scales.kl: 0.1
