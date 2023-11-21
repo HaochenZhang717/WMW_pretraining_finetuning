@@ -35,8 +35,11 @@ def main():
     )
     parsed, remaining = common.Flags(configs=["defaults"]).parse(known_only=True)
     config = common.Config(configs["defaults"])
-    for name in parsed.configs:
-        config = config.update(configs[name])
+
+    # for name in parsed.configs:
+    #     config = config.update(configs[name])
+    config = config.update(configs["somethingv2"])
+
     config = common.Flags(config).parse(remaining)
 
     logdir = pathlib.Path(config.logdir).expanduser()
@@ -56,15 +59,23 @@ def main():
         tf.config.experimental.set_memory_growth(gpu, True)
     assert config.precision in (16, 32), config.precision
     if config.precision == 16:
-        from tensorflow.keras.mixed_precision import experimental as prec
+        import tensorflow.keras.mixed_precision as prec
+        prec.set_global_policy("mixed_float16")
 
-        prec.set_policy(prec.Policy("mixed_float16"))
+    # train_replay = common.ReplayWithoutAction(
+    #     logdir / "train_episodes",
+    #     load_directory=load_logdir / "train_episodes",
+    #     **config.replay
+    # )
 
     train_replay = common.ReplayWithoutAction(
-        logdir / "train_episodes",
-        load_directory=load_logdir / "train_episodes",
+        logdir,
+        load_directory=load_logdir,
         **config.replay
     )
+
+
+
     step = common.Counter(train_replay.stats["total_steps"])
     outputs = [
         common.TerminalOutput(),
@@ -84,17 +95,6 @@ def main():
                 task, config.action_repeat, config.render_size, config.dmc_camera
             )
             env = common.NormalizeAction(env)
-        elif suite == "atari":
-            env = common.Atari(
-                task, config.action_repeat, config.render_size, config.atari_grayscale
-            )
-            env = common.OneHotAction(env)
-        elif suite == "crafter":
-            assert config.action_repeat == 1
-            outdir = logdir / "crafter" if mode == "train" else None
-            reward = bool(["noreward", "reward"].index(task)) or mode == "eval"
-            env = common.Crafter(outdir, reward)
-            env = common.OneHotAction(env)
         elif suite == "metaworld":
             task = "-".join(task.split("_"))
             env = common.MetaWorld(
@@ -105,10 +105,18 @@ def main():
                 config.camera,
             )
             env = common.NormalizeAction(env)
+        elif suite == "rlbench":
+            env = common.RLBench(
+                task,
+                config.render_size,
+                config.action_repeat,
+            )
+            env = common.NormalizeAction(env)
         else:
             raise NotImplementedError(suite)
         env = common.TimeLimit(env, config.time_limit)
         return env
+
 
     print("Create envs.")
     env = make_env("train")
@@ -116,9 +124,13 @@ def main():
 
     print("Create agent.")
     train_dataset = iter(train_replay.dataset(**config.dataset))
+    mae_train_dataset = iter(train_replay.dataset(**config.mae_dataset))
     report_dataset = iter(train_replay.dataset(**config.dataset))
     agnt = agent.Agent(config, obs_space, act_space, step)
+    train_mae = agnt.train_mae
     train_agent = common.CarryOverState(agnt.train)
+
+    train_mae(next(mae_train_dataset))
     train_agent(next(train_dataset))
 
     if (logdir / "variables.pkl").exists():
@@ -127,8 +139,17 @@ def main():
     print("Train a video prediction model.")
     # for step in tqdm(range(step, config.steps), total=config.steps, initial=step):
     for _ in range(int(step.value), int(config.steps)):
+        # train mae
+        # print('#####################')
+        # print(step.value)
+        # print(config.steps)
+        # print('#####################')
+        mets = train_mae(next(mae_train_dataset))
+        [metrics[key].append(value) for key, value in mets.items()]
+        # train other part of wm
         mets = train_agent(next(train_dataset))
         [metrics[key].append(value) for key, value in mets.items()]
+
         step.increment()
 
         if should_log(step):
@@ -140,17 +161,21 @@ def main():
 
         if should_save(step):
             agnt.save(logdir / "variables.pkl")
-            agnt.wm.rssm.save(logdir / "rssm_variables.pkl", verbose=False)
-            agnt.wm.encoder.save(logdir / "encoder_variables.pkl", verbose=False)
-            agnt.wm.heads["decoder"].save(
-                logdir / "decoder_variables.pkl", verbose=False
-            )
+
+            agnt.wm.tssm.save(logdir / "tssm_variables.pkl", verbose=False)
+            agnt.wm.wm_vit_encoder.save(logdir / "wm_vit_encoder_variables.pkl", verbose=False)
+            agnt.wm.wm_vit_decoder.save(logdir / "wm_vit_decoder_variables.pkl", verbose=False)
+            agnt.wm.mae_encoder.save(logdir / "mae_encoder_variables.pkl", verbose=False)
+            agnt.wm.mae_decoder.save(logdir / "mae_decoder_variables.pkl", verbose=False)
 
     env.close()
     agnt.save(logdir / "variables.pkl")
-    agnt.wm.rssm.save(logdir / "rssm_variables.pkl", verbose=False)
-    agnt.wm.encoder.save(logdir / "encoder_variables.pkl", verbose=False)
-    agnt.wm.heads["decoder"].save(logdir / "decoder_variables.pkl", verbose=False)
+
+    agnt.wm.tssm.save(logdir / "rssm_variables.pkl", verbose=False)
+    agnt.wm.wm_vit_encoder.save(logdir / "wm_vit_encoder_variables.pkl", verbose=False)
+    agnt.wm.wm_vit_decoder.save(logdir / "wm_vit_decoder_variables.pkl", verbose=False)
+    agnt.wm.mae_encoder.save(logdir / "mae_encoder_variables.pkl", verbose=False)
+    agnt.wm.mae_decoder.save(logdir / "mae_decoder_variables.pkl", verbose=False)
 
 
 if __name__ == "__main__":

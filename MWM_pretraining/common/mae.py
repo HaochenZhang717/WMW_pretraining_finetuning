@@ -130,9 +130,9 @@ class MaskedViTEncoder(common.Module):
                     2,
                     padding="SAME",
                 )(x)
-                x = tf.nn.relu(x)
-            x = self.get("early_conv_proj", tfkl.Conv2D, self.embed_dim, 1, 1)(x)
-            x = tf.reshape(x, [x.shape[0], -1, self.embed_dim])
+                x = tf.nn.relu(x) # (B*T, 8, 8, 128)
+            x = self.get("early_conv_proj", tfkl.Conv2D, self.embed_dim, 1, 1)(x)#(B*T, 8, 8, 256)
+            x = tf.reshape(x, [x.shape[0], -1, self.embed_dim])#(B*T, 64, 256)
         else:
             x = self.get(
                 "encoder_patch_embed",
@@ -362,6 +362,8 @@ class ViTEncoder(common.Module):
         num_heads=16,
         mlp_ratio=4.0,
         norm_layer="layer_norm_eps_1e-6",
+        stoch=32,
+        discrete=32
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -371,6 +373,8 @@ class ViTEncoder(common.Module):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.norm_layer = norm_layer
+        self._stoch = stoch
+        self._discrete = discrete
         self._cast = lambda x: tf.cast(x, prec.global_policy().compute_dtype)
 
         self.pos_embed = tf.constant(
@@ -381,8 +385,9 @@ class ViTEncoder(common.Module):
             dtype=tf.float32,
         )
 
-    def forward_encoder(self, x):
+    def forward_encoder(self, x, bitch_size, video_length, sample=True):
         # embed patches
+
         x = self._cast(x)
         batch_size = tf.shape(x)[0]
         x = self.get("encoder_embed", tfkl.Dense, self.embed_dim)(x)
@@ -404,8 +409,45 @@ class ViTEncoder(common.Module):
                 act_layer="gelu",
             )(x)
         x = self.get("vit_encoder_norm", norm_layer_factory(self.norm_layer))(x)
+        assert x.shape[0] == bitch_size * video_length
+        #the way to merge axis=1 of x may be suboptimal, but I follow the way used in WMW paper
+        x = x.mean(1).reshape([bitch_size, video_length, -1])
+        deter = x
+        x = self.get("vit_out", tfkl.Dense, self.embed_dim)(x)
+        x = tf.nn.elu(x)
+        stats = self._suff_stats_layer("vit_dist", x)
+        dist = self.get_dist(stats)
+        stoch = dist.sample() if sample else dist.mode()
+        post = {"stoch": stoch, "deter": deter, **stats}
+        return post
 
-        return x
+    def _suff_stats_layer(self, name, x):
+        if self._discrete:
+            x = self.get(name, tfkl.Dense, self._stoch * self._discrete, None)(x)
+            logit = tf.reshape(x, x.shape[:-1] + [self._stoch, self._discrete])
+            return {"logit": logit}
+        else:
+            x = self.get(name, tfkl.Dense, 2 * self._stoch, None)(x)
+            mean, std = tf.split(x, 2, -1)
+            std = {
+                "softplus": lambda: tf.nn.softplus(std),
+                "sigmoid": lambda: tf.nn.sigmoid(std),
+                "sigmoid2": lambda: 2 * tf.nn.sigmoid(std / 2),
+            }[self._std_act]()
+            std = std + self._min_std
+            return {"mean": mean, "std": std}
+
+    def get_dist(self, state):
+        if self._discrete:
+            logit = state["logit"]
+            logit = tf.cast(logit, tf.float32)
+            dist = tfd.Independent(common.OneHotDist(logit), 1)
+        else:
+            mean, std = state["mean"], state["std"]
+            mean = tf.cast(mean, tf.float32)
+            std = tf.cast(std, tf.float32)
+            dist = tfd.MultivariateNormalDiag(mean, std)
+        return dist
 
 
 class ViTDecoder(common.Module):
@@ -543,6 +585,8 @@ def flat_vit_factory(
     decoder_depth,
     decoder_num_heads,
     in_chans=3,
+    stoch=32,
+    discrete=32
 ):
     encoder = ViTEncoder(
         img_size=img_size,
@@ -552,6 +596,8 @@ def flat_vit_factory(
         num_heads=num_heads,
         mlp_ratio=4.0,
         norm_layer="layer_norm_eps_1e-6",
+        discrete=discrete,
+        stoch=stoch
     )
     decoder = ViTDecoder(
         img_size=img_size,

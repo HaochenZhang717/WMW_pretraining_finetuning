@@ -197,5 +197,5 @@ class CarryOverState:
         self._state = None
 
     def __call__(self, *args):
-        self._state, out = self._fn(*args, self._state)
+        self._state, out = self._fn(*args)
         return out

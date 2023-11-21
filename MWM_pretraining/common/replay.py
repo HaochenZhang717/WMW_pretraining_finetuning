@@ -7,8 +7,6 @@ import uuid
 import numpy as np
 import tensorflow as tf
 
-import albumentations as A
-
 
 class Replay:
     def __init__(
@@ -36,6 +34,7 @@ class Replay:
 
         # filename -> key -> value_sequence
         self._complete_eps = load_episodes(load_directory, capacity, minlen)
+
         if len(self._complete_eps) != 0:
             self._eps_keys = list(self._complete_eps.keys())
         else:
@@ -134,6 +133,11 @@ class Replay:
         sequence["is_first"] = np.zeros(len(sequence["reward"]), bool)
         sequence["is_first"][0] = True
         if self._maxlen:
+            # print("$$$$$$$$$$$$$$$$$$$")
+            # print(len(sequence["reward"]))
+            # print(self._maxlen)
+            # print(self._minlen)
+            # print("$$$$$$$$$$$$$$$$$$$")
             assert self._minlen <= len(sequence["reward"]) <= self._maxlen
         return sequence
 
@@ -146,6 +150,65 @@ class Replay:
             self._loaded_steps -= eplen(episode)
             self._loaded_episodes -= 1
             del self._complete_eps[oldest]
+
+
+class ReplayWithoutAction(Replay):
+    def __init__(
+        self,
+        directory,
+        load_directory=None,
+        capacity=0,
+        minlen=1,
+        maxlen=0,
+        prioritize_ends=False,
+    ):
+        super().__init__(
+            directory=directory,
+            load_directory=load_directory,
+            capacity=capacity,
+            minlen=minlen,
+            maxlen=maxlen,
+            prioritize_ends=prioritize_ends,
+        )
+
+    def _generate_chunks(self, length):
+        sequence = self._sample_sequence()
+        sequence = {
+            k: v
+            for k, v in sequence.items()
+            if k in ["is_first", "is_last", "is_terminal", "image"]
+        }
+        sequence["action"] = np.zeros((sequence["image"].shape[0], 1), dtype=np.float32)
+
+        while True:
+            chunk = collections.defaultdict(list)
+            added = 0
+            while added < length:
+                needed = length - added
+                adding = {k: v[:needed] for k, v in sequence.items()}
+                sequence = {k: v[needed:] for k, v in sequence.items()}
+                for key, value in adding.items():
+                    chunk[key].append(value)
+                added += len(adding["image"])
+                if len(sequence["image"]) < 1:
+                    sequence = self._sample_sequence()
+                    sequence = {
+                        k: v
+                        for k, v in sequence.items()
+                        if k
+                        in [
+                            "is_first",
+                            "is_last",
+                            "is_terminal",
+                            "image",
+                        ]
+                    }
+                    sequence["action"] = np.zeros(
+                        (sequence["image"].shape[0], 1), dtype=np.float32
+                    )
+
+            chunk = {k: np.concatenate(v) for k, v in chunk.items()}
+            yield chunk
 
 
 def count_episodes(directory):
@@ -172,11 +235,16 @@ def load_episodes(directory, capacity=None, minlen=1):
     # The returned directory from filenames to episodes is guaranteed to be in
     # temporally sorted order.
     filenames = sorted(directory.glob("*.npz"))
+    print('###################')
+    print(len(filenames))
+    print('###################')
+
     if capacity:
         num_steps = 0
         num_episodes = 0
         for filename in reversed(filenames):
-            length = int(str(filename).split("-")[-1][:-4])
+            # length = int(str(filename).split("-")[-1][:-4])
+            length = int(np.load(filename)['image'].shape[0])
             num_steps += length
             num_episodes += 1
             if num_steps >= capacity:
@@ -192,6 +260,15 @@ def load_episodes(directory, capacity=None, minlen=1):
             print(f"Could not load episode {str(filename)}: {e}")
             continue
         episodes[str(filename)] = episode
+    # import matplotlib.pyplot as plt
+    # import matplotlib.image as mpimg
+    # plt.imshow(episodes['/home/hchen/apv_remote/pretraining_datasets/rlbench/train_episodes/beat_the_buzz_front_rgb_episode-0-140.npz']['image'][0,:,:,:])
+    # plt.imshow(episodes[0]['image'][0,:,:,:], interpolation='nearest')
+    # plt.savefig('show_an_image')
+    # print("===============================================")
+    # print("===============================================")
+    # print("===============================================")
+    # print("===============================================")
     return episodes
 
 
