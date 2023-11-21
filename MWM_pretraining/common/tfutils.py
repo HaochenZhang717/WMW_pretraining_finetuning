@@ -65,7 +65,15 @@ class Module(tf.Module):
 
 class Optimizer(tf.Module):
     def __init__(
-        self, name, lr, eps=1e-4, clip=None, wd=None, opt="adam", wd_pattern=r".*"
+        self,
+        name,
+        lr,
+        eps=1e-4,
+        clip=None,
+        wd=None,
+        opt="adam",
+        warmup=0,
+        wd_pattern=r".*",
     ):
         assert 0 <= wd < 1
         assert not clip or 1 <= clip
@@ -73,12 +81,18 @@ class Optimizer(tf.Module):
         self._clip = clip
         self._wd = wd
         self._wd_pattern = wd_pattern
+        self._updates = tf.Variable(0, trainable=False, dtype=tf.int64)
+        self._lr = lr
+        if warmup:
+            self._lr = lambda: lr * tf.clip_by_value(
+                self._updates.astype(tf.float32) / warmup, 0.0, 1.0
+            )
         self._opt = {
-            "adam": lambda: tf.optimizers.Adam(lr, epsilon=eps),
-            "nadam": lambda: tf.optimizers.Nadam(lr, epsilon=eps),
-            "adamax": lambda: tf.optimizers.Adamax(lr, epsilon=eps),
-            "sgd": lambda: tf.optimizers.SGD(lr),
-            "momentum": lambda: tf.optimizers.SGD(lr, 0.9),
+            "adam": lambda: tf.optimizers.Adam(self._lr, epsilon=eps),
+            "nadam": lambda: tf.optimizers.Nadam(self._lr, epsilon=eps),
+            "adamax": lambda: tf.optimizers.Adamax(self._lr, epsilon=eps),
+            "sgd": lambda: tf.optimizers.SGD(self._lr),
+            "momentum": lambda: tf.optimizers.SGD(self._lr, 0.9),
         }[opt]()
         self._mixed = prec.global_policy().compute_dtype == tf.float16
         if self._mixed:
@@ -137,15 +151,16 @@ class Optimizer(tf.Module):
         self._opt.apply_gradients(
             zip(grads, varibs), experimental_aggregate_gradients=False
         )
+        self._updates.assign_add(1)
 
         return metrics
 
     def _apply_weight_decay(self, varibs):
         nontrivial = self._wd_pattern != r".*"
-        if nontrivial:
-            print("Applied weight decay to variables:")
+        # if nontrivial:
+        #     print("Applied weight decay to variables:")
         for var in varibs:
             if re.search(self._wd_pattern, self._name + "/" + var.name):
-                if nontrivial:
-                    print("- " + self._name + "/" + var.name)
+                # if nontrivial:
+                #     print("- " + self._name + "/" + var.name)
                 var.assign((1 - self._wd) * var)

@@ -117,3 +117,63 @@ class TanhBijector(tfp.bijectors.Bijector):
     def _forward_log_det_jacobian(self, x):
         log2 = tf.math.log(tf.constant(2.0, dtype=x.dtype))
         return 2.0 * (log2 - x - tf.nn.softplus(-2.0 * x))
+
+
+class MSEDist:
+    def __init__(self, mode, dims, agg="sum"):
+        self._mode = mode
+        self._dims = tuple([-x for x in range(1, dims + 1)])
+        self._agg = agg
+        self.batch_shape = mode.shape[: len(mode.shape) - dims]
+        self.event_shape = mode.shape[len(mode.shape) - dims :]
+
+    def mode(self):
+        return self._mode
+
+    def mean(self):
+        return self._mode
+
+    def log_prob(self, value):
+        assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
+        distance = (self._mode - value) ** 2
+        if self._agg == "mean":
+            loss = distance.mean(self._dims)
+        elif self._agg == "sum":
+            loss = distance.sum(self._dims)
+        else:
+            raise NotImplementedError(self._agg)
+        return -loss
+
+
+class SymlogDist:
+    def __init__(self, mode, dims, agg="sum"):
+        self._mode = mode
+        self._dims = tuple([-x for x in range(1, dims + 1)])
+        self._agg = agg
+        self.batch_shape = mode.shape[: len(mode.shape) - dims]
+        self.event_shape = mode.shape[len(mode.shape) - dims :]
+
+    def mode(self):
+        return symexp(self._mode)
+
+    def mean(self):
+        return symexp(self._mode)
+
+    def log_prob(self, value):
+        assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
+        distance = (self._mode - symlog(value)) ** 2
+        if self._agg == "mean":
+            loss = distance.mean(self._dims)
+        elif self._agg == "sum":
+            loss = distance.sum(self._dims)
+        else:
+            raise NotImplementedError(self._agg)
+        return -loss
+
+
+def symlog(x):
+    return tf.sign(x) * tf.math.log(1 + tf.abs(x))
+
+
+def symexp(x):
+    return tf.sign(x) * (tf.math.exp(tf.abs(x)) - 1)

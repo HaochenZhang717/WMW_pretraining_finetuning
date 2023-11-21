@@ -7,6 +7,8 @@ import uuid
 import numpy as np
 import tensorflow as tf
 
+import albumentations as A
+
 
 class Replay:
     def __init__(
@@ -14,7 +16,6 @@ class Replay:
         directory,
         load_directory=None,
         capacity=0,
-        ongoing=False,
         minlen=1,
         maxlen=0,
         prioritize_ends=False,
@@ -22,12 +23,12 @@ class Replay:
         self._directory = pathlib.Path(directory).expanduser()
         self._directory.mkdir(parents=True, exist_ok=True)
         self._capacity = capacity
-        self._ongoing = ongoing
         self._minlen = minlen
         self._maxlen = maxlen
         self._prioritize_ends = prioritize_ends
         self._random = np.random.RandomState()
 
+        self.load_directory = load_directory
         if load_directory is None:
             load_directory = self._directory
         else:
@@ -35,6 +36,10 @@ class Replay:
 
         # filename -> key -> value_sequence
         self._complete_eps = load_episodes(load_directory, capacity, minlen)
+        if len(self._complete_eps) != 0:
+            self._eps_keys = list(self._complete_eps.keys())
+        else:
+            self._eps_keys = []
         # worker -> key -> value_sequence
         self._ongoing_eps = collections.defaultdict(
             lambda: collections.defaultdict(list)
@@ -72,6 +77,7 @@ class Replay:
         episode = {key: convert(value) for key, value in episode.items()}
         filename = save_episode(self._directory, episode)
         self._complete_eps[str(filename)] = episode
+        self._eps_keys.append(str(filename))
         self._enforce_limit()
 
     def dataset(self, batch, length):
@@ -103,12 +109,11 @@ class Replay:
             yield chunk
 
     def _sample_sequence(self):
-        episodes = list(self._complete_eps.values())
-        if self._ongoing:
-            episodes += [
-                x for x in self._ongoing_eps.values() if eplen(x) >= self._minlen
-            ]
-        episode = self._random.choice(episodes)
+        L = len(self._eps_keys)
+        i = np.random.randint(0, L)
+        episode_key = self._eps_keys[i]
+        episode = self._complete_eps[episode_key]
+        
         total = len(episode["reward"])
         length = total
         if self._maxlen:
@@ -126,7 +131,7 @@ class Replay:
             for k, v in episode.items()
             if not k.startswith("log_")
         }
-        sequence["is_first"] = np.zeros(len(sequence["reward"]), np.bool)
+        sequence["is_first"] = np.zeros(len(sequence["reward"]), bool)
         sequence["is_first"][0] = True
         if self._maxlen:
             assert self._minlen <= len(sequence["reward"]) <= self._maxlen
@@ -141,67 +146,6 @@ class Replay:
             self._loaded_steps -= eplen(episode)
             self._loaded_episodes -= 1
             del self._complete_eps[oldest]
-
-
-class ReplayWithoutAction(Replay):
-    def __init__(
-        self,
-        directory,
-        load_directory=None,
-        capacity=0,
-        ongoing=False,
-        minlen=1,
-        maxlen=0,
-        prioritize_ends=False,
-    ):
-        super().__init__(
-            directory=directory,
-            load_directory=load_directory,
-            capacity=capacity,
-            ongoing=ongoing,
-            minlen=minlen,
-            maxlen=maxlen,
-            prioritize_ends=prioritize_ends,
-        )
-
-    def _generate_chunks(self, length):
-        sequence = self._sample_sequence()
-        sequence = {
-            k: v
-            for k, v in sequence.items()
-            if k in ["is_first", "is_last", "is_terminal", "image"]
-        }
-        sequence["action"] = np.zeros((sequence["image"].shape[0], 1), dtype=np.float32)
-
-        while True:
-            chunk = collections.defaultdict(list)
-            added = 0
-            while added < length:
-                needed = length - added
-                adding = {k: v[:needed] for k, v in sequence.items()}
-                sequence = {k: v[needed:] for k, v in sequence.items()}
-                for key, value in adding.items():
-                    chunk[key].append(value)
-                added += len(adding["image"])
-                if len(sequence["image"]) < 1:
-                    sequence = self._sample_sequence()
-                    sequence = {
-                        k: v
-                        for k, v in sequence.items()
-                        if k
-                        in [
-                            "is_first",
-                            "is_last",
-                            "is_terminal",
-                            "image",
-                        ]
-                    }
-                    sequence["action"] = np.zeros(
-                        (sequence["image"].shape[0], 1), dtype=np.float32
-                    )
-
-            chunk = {k: np.concatenate(v) for k, v in chunk.items()}
-            yield chunk
 
 
 def count_episodes(directory):
@@ -263,4 +207,4 @@ def convert(value):
 
 
 def eplen(episode):
-    return len(episode["image"]) - 1
+    return len(episode["reward"]) - 1

@@ -35,6 +35,7 @@ class Driver:
             }
             for i, ob in obs.items():
                 self._obs[i] = ob() if callable(ob) else ob
+                ob = self._obs[i]
                 act = {k: np.zeros(v.shape) for k, v in self._act_spaces[i].items()}
                 tran = {k: self._convert(v) for k, v in {**ob, **act}.items()}
                 [fn(tran, worker=i, **self._kwargs) for fn in self._on_resets]

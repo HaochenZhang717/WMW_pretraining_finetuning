@@ -1,12 +1,18 @@
 import atexit
 import os
+import random
 import sys
 import threading
 import traceback
 
 import cloudpickle
+from functools import partial
 import gym
 import numpy as np
+
+
+def process_state(s):
+    return np.concatenate([s[:1], s[22:-3]])
 
 
 class GymWrapper:
@@ -34,9 +40,9 @@ class GymWrapper:
         return {
             **spaces,
             "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
+            "is_first": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_last": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_terminal": gym.spaces.Box(0, 1, (), dtype=bool),
         }
 
     @property
@@ -95,22 +101,6 @@ class DMC:
                 quadruped_run=2,
                 quadruped_escape=2,
                 quadruped_fetch=2,
-                pentaped_walk=2,
-                pentaped_run=2,
-                pentaped_escape=2,
-                pentaped_fetch=2,
-                biped_walk=2,
-                biped_run=2,
-                biped_escape=2,
-                biped_fetch=2,
-                triped_walk=2,
-                triped_run=2,
-                triped_escape=2,
-                triped_fetch=2,
-                hexaped_walk=2,
-                hexaped_run=2,
-                hexaped_escape=2,
-                hexaped_fetch=2,
                 locom_rodent_maze_forage=1,
                 locom_rodent_two_touch=1,
             ).get(name, 0)
@@ -126,9 +116,9 @@ class DMC:
         spaces = {
             "image": gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8),
             "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
+            "is_first": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_last": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_terminal": gym.spaces.Box(0, 1, (), dtype=bool),
         }
         for key, value in self._env.observation_spec().items():
             if key in self._ignored_keys:
@@ -192,7 +182,14 @@ class DMC:
 
 
 class MetaWorld:
-    def __init__(self, name, seed=None, action_repeat=1, size=(64, 64), camera=None, use_gripper=False):
+    def __init__(
+        self,
+        name,
+        seed=None,
+        action_repeat=1,
+        size=(64, 64),
+        camera=None,
+    ):
         import metaworld
         from metaworld.envs import (
             ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
@@ -207,7 +204,6 @@ class MetaWorld:
         self._env._freeze_rand_vec = False
         self._size = size
         self._action_repeat = action_repeat
-        self._use_gripper = use_gripper
 
         self._camera = camera
 
@@ -216,14 +212,12 @@ class MetaWorld:
         spaces = {
             "image": gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8),
             "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
+            "is_first": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_last": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_terminal": gym.spaces.Box(0, 1, (), dtype=bool),
             "state": self._env.observation_space,
-            "success": gym.spaces.Box(0, 1, (), dtype=np.bool),
+            "success": gym.spaces.Box(0, 1, (), dtype=bool),
         }
-        if self._use_gripper:
-            spaces["gripper_image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
         return spaces
 
     @property
@@ -234,32 +228,28 @@ class MetaWorld:
     def step(self, action):
         assert np.isfinite(action["action"]).all(), action["action"]
         reward = 0.0
+        success = 0.0
         for _ in range(self._action_repeat):
             state, rew, done, info = self._env.step(action["action"])
-            success = float(info["success"])
+            success += float(info["success"])
             reward += rew or 0.0
-            if done or success == 1.0:
-                break
+        success = min(success, 1.0)
         assert success in [0.0, 1.0]
         obs = {
             "reward": reward,
             "is_first": False,
-            "is_last": False, # will be handled by timelimit wrapper
-            "is_terminal": False, # will be handled by per_episode function
+            "is_last": False,  # will be handled by timelimit wrapper
+            "is_terminal": False,  # will be handled by per_episode function
             "image": self._env.sim.render(
                 *self._size, mode="offscreen", camera_name=self._camera
             ),
             "state": state,
             "success": success,
         }
-        if self._use_gripper:
-            obs["gripper_image"] = self._env.sim.render(
-                *self._size, mode="offscreen", camera_name="behindGripper"
-            )
         return obs
 
     def reset(self):
-        if self._camera == 'corner2':
+        if self._camera == "corner2":
             self._env.model.cam_pos[2][:] = [0.75, 0.075, 0.7]
         state = self._env.reset()
         obs = {
@@ -273,350 +263,117 @@ class MetaWorld:
             "state": state,
             "success": False,
         }
-        if self._use_gripper:
-            obs["gripper_image"] = self._env.sim.render(
-                *self._size, mode="offscreen", camera_name="behindGripper"
-            )
         return obs
 
 
-class Atari:
-
-    LOCK = threading.Lock()
-
+class RLBench:
     def __init__(
         self,
         name,
-        action_repeat=4,
-        size=(84, 84),
-        grayscale=True,
-        noops=30,
-        life_done=False,
-        sticky=True,
-        all_actions=False,
+        size=(64, 64),
+        action_repeat=1,
     ):
-        assert size[0] == size[1]
-        import gym.wrappers
-        import gym.envs.atari
+        from rlbench.action_modes.action_mode import MoveArmThenGripper
+        from rlbench.action_modes.arm_action_modes import JointPosition
+        from rlbench.action_modes.gripper_action_modes import Discrete
+        from rlbench.environment import Environment
+        from rlbench.observation_config import ObservationConfig
+        from rlbench.tasks import ReachTarget
 
-        if name == "james_bond":
-            name = "jamesbond"
-        with self.LOCK:
-            env = gym.envs.atari.AtariEnv(
-                game=name,
-                obs_type="image",
-                frameskip=1,
-                repeat_action_probability=0.25 if sticky else 0.0,
-                full_action_space=all_actions,
-            )
-        # Avoid unnecessary rendering in inner env.
-        env._get_obs = lambda: None
-        # Tell wrapper that the inner env has no action repeat.
-        env.spec = gym.envs.registration.EnvSpec("NoFrameskip-v0")
-        self._env = gym.wrappers.AtariPreprocessing(
-            env, noops, action_repeat, size[0], life_done, grayscale
+        # we only support reach_target in this codebase
+        obs_config = ObservationConfig()
+        obs_config.left_shoulder_camera.set_all(False)
+        obs_config.right_shoulder_camera.set_all(False)
+        obs_config.overhead_camera.set_all(False)
+        obs_config.wrist_camera.set_all(False)
+        obs_config.front_camera.image_size = size
+        obs_config.front_camera.depth = False
+        obs_config.front_camera.point_cloud = False
+        obs_config.front_camera.mask = False
+
+        action_mode = partial(JointPosition, absolute_mode=False)
+
+        env = Environment(
+            action_mode=MoveArmThenGripper(
+                arm_action_mode=action_mode(), gripper_action_mode=Discrete()
+            ),
+            obs_config=obs_config,
+            headless=True,
+            shaped_rewards=True,
         )
+        env.launch()
+
+        if name == "reach_target":
+            task = ReachTarget
+        else:
+            raise ValueError(name)
+        self._env = env
+        self._task = env.get_task(task)
+
+        _, obs = self._task.reset()
+        self._prev_obs = None
+
         self._size = size
-        self._grayscale = grayscale
-
-    @property
-    def obs_space(self):
-        shape = self._size + (1 if self._grayscale else 3,)
-        return {
-            "image": gym.spaces.Box(0, 255, shape, np.uint8),
-            "ram": gym.spaces.Box(0, 255, (128,), np.uint8),
-            "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
-        }
-
-    @property
-    def act_space(self):
-        return {"action": self._env.action_space}
-
-    def step(self, action):
-        image, reward, done, info = self._env.step(action["action"])
-        if self._grayscale:
-            image = image[..., None]
-        return {
-            "image": image,
-            "ram": self._env.env._get_ram(),
-            "reward": reward,
-            "is_first": False,
-            "is_last": done,
-            "is_terminal": done,
-        }
-
-    def reset(self):
-        with self.LOCK:
-            image = self._env.reset()
-        if self._grayscale:
-            image = image[..., None]
-        return {
-            "image": image,
-            "ram": self._env.env._get_ram(),
-            "reward": 0.0,
-            "is_first": True,
-            "is_last": False,
-            "is_terminal": False,
-        }
-
-    def close(self):
-        return self._env.close()
-
-
-class Crafter:
-    def __init__(self, outdir=None, reward=True, seed=None):
-        import crafter
-
-        self._env = crafter.Env(reward=reward, seed=seed)
-        self._env = crafter.Recorder(
-            self._env,
-            outdir,
-            save_stats=True,
-            save_video=False,
-            save_episode=False,
-        )
-        self._achievements = crafter.constants.achievements.copy()
+        self._action_repeat = action_repeat
 
     @property
     def obs_space(self):
         spaces = {
-            "image": self._env.observation_space,
+            "image": gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8),
             "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "log_reward": gym.spaces.Box(-np.inf, np.inf, (), np.float32),
+            "is_first": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_last": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_terminal": gym.spaces.Box(0, 1, (), dtype=bool),
+            "success": gym.spaces.Box(0, 1, (), dtype=bool),
         }
-        spaces.update(
-            {
-                f"log_achievement_{k}": gym.spaces.Box(0, 2 ** 31 - 1, (), np.int32)
-                for k in self._achievements
-            }
-        )
         return spaces
 
     @property
     def act_space(self):
-        return {"action": self._env.action_space}
-
-    def step(self, action):
-        image, reward, done, info = self._env.step(action["action"])
-        obs = {
-            "image": image,
-            "reward": reward,
-            "is_first": False,
-            "is_last": done,
-            "is_terminal": info["discount"] == 0,
-            "log_reward": info["reward"],
-        }
-        obs.update({f"log_achievement_{k}": v for k, v in info["achievements"].items()})
-        return obs
-
-    def reset(self):
-        obs = {
-            "image": self._env.reset(),
-            "reward": 0.0,
-            "is_first": True,
-            "is_last": False,
-            "is_terminal": False,
-            "log_reward": 0.0,
-        }
-        obs.update({f"log_achievement_{k}": 0 for k in self._achievements})
-        return obs
-
-
-class RoboDesk:
-    def __init__(self, name, action_repeat, size=(64, 64)):
-        os.environ["MUJOCO_GL"] = "egl"
-
-        import robodesk
-
-        self._env = robodesk.RoboDesk(
-            task=name,
-            reward="dense",
-            action_repeat=action_repeat,
-            episode_length=500,
-            image_size=size[0],
+        action = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=self._env.action_shape, dtype=np.float32
         )
-
-        self._ignored_keys = []
-        for key, value in self._env.observation_space.items():
-            if value.shape == (0,):
-                print(f"Ignoring empty observation key '{key}'.")
-                self._ignored_keys.append(key)
-
-    @property
-    def obs_space(self):
-        spaces = {
-            "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "image": self._env.observation_space["image"],
-        }
-        # for key, value in self._env.observation_space.items():
-        #     if key in self._ignored_keys:
-        #         continue
-        #     spaces[key] = value
-        return spaces
-
-    @property
-    def act_space(self):
-        return {"action": self._env.action_space}
+        return {"action": action}
 
     def step(self, action):
         assert np.isfinite(action["action"]).all(), action["action"]
-        obs, reward, done, info = self._env.step(action["action"])
-        return {
-            "image": obs["image"],
+        try:
+            reward = 0.0
+            for i in range(self._action_repeat):
+                obs, reward_, terminal = self._task.step(action["action"])
+                success, _ = self._task._task.success()
+                reward += reward_
+                if terminal:
+                    break
+            self._prev_obs = obs
+        except (IKError, ConfigurationPathError, InvalidActionError) as e:
+            terminal = True
+            success = False
+            reward = 0.0
+            obs = self._prev_obs
+
+        obs = {
             "reward": reward,
             "is_first": False,
-            "is_last": done,
-            "is_terminal": done,
+            "is_last": terminal,
+            "is_terminal": terminal,
+            "image": obs.front_rgb,
+            "success": success,
         }
+        return obs
 
     def reset(self):
-        obs = self._env.reset()
-        return {
-            "image": obs["image"],
+        _, obs = self._task.reset()
+        self._prev_obs = obs
+        obs = {
             "reward": 0.0,
             "is_first": True,
             "is_last": False,
             "is_terminal": False,
+            "image": obs.front_rgb,
+            "success": False,
         }
-
-    def close(self):
-        return self._env.close()
-
-
-class A1Locomotion:
-    def __init__(self, size=(64, 64)):
-        self._env = gym.make("motion_imitation:A1GymEnv-v1")
-        self._size = size
-
-        from PIL import Image
-
-        self._Image = Image
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        try:
-            return getattr(self._env, name)
-        except AttributeError:
-            raise ValueError(name)
-
-    @property
-    def obs_space(self):
-        shape = self._size + (3,)
-        return {
-            "image": gym.spaces.Box(0, 255, shape, np.uint8),
-            "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
-        }
-
-    @property
-    def act_space(self):
-        return {"action": self._env.action_space}
-
-    def step(self, action):
-        action = action["action"]
-        state, reward, done, info = self._env.step(action)
-        image = self._env.render(mode="rgb_array")
-        obs = {"image": self._resize(image)}
-        obs["reward"] = float(reward)
-        obs["is_first"] = False
-        obs["is_last"] = done
-        obs["is_terminal"] = info.get("is_terminal", done)
         return obs
-
-    def reset(self):
-        state = self._env.reset()
-        image = self._env.render(mode="rgb_array")
-        obs = {"image": self._resize(image)}
-        obs["reward"] = 0.0
-        obs["is_first"] = True
-        obs["is_last"] = False
-        obs["is_terminal"] = False
-        return obs
-
-    def _resize(self, image):
-        image = self._Image.fromarray(image)
-        image = image.resize(self._size, self._Image.NEAREST)
-        image = np.array(image)
-        return image
-
-
-class Procgen:
-    def __init__(self, name, size=(64, 64)):
-        from procgen import ProcgenEnv
-
-        self._env = ProcgenEnv(
-            num_envs=1,
-            env_name=name,
-            num_levels=100,
-            start_level=0,
-            distribution_mode="easy",
-        )
-
-        from PIL import Image
-
-        self._Image = Image
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        try:
-            return getattr(self._env, name)
-        except AttributeError:
-            raise ValueError(name)
-
-    @property
-    def obs_space(self):
-        shape = self._size + (3,)
-        return {
-            "image": gym.spaces.Box(0, 255, shape, np.uint8),
-            "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
-        }
-
-    @property
-    def act_space(self):
-        return {"action": self._env.action_space}
-
-    def step(self, action):
-        action = action["action"]
-        obs, reward, done, info = self._env.step(action)
-        image = obs["rgb"]
-        obs = {"image": self._resize(image)}
-        obs["reward"] = float(reward)
-        obs["is_first"] = False
-        obs["is_last"] = done
-        obs["is_terminal"] = info.get("is_terminal", done)
-        return obs
-
-    def reset(self):
-        obs = self._env.reset()
-        image = obs["rgb"]
-        obs = {"image": self._resize(image)}
-        obs["reward"] = 0.0
-        obs["is_first"] = True
-        obs["is_last"] = False
-        obs["is_terminal"] = False
-        return obs
-
-    def _resize(self, image):
-        image = self._Image.fromarray(image)
-        image = image.resize(self._size, self._Image.NEAREST)
-        image = np.array(image)
-        return image
 
 
 class Dummy:
@@ -628,9 +385,9 @@ class Dummy:
         return {
             "image": gym.spaces.Box(0, 255, (64, 64, 3), dtype=np.uint8),
             "reward": gym.spaces.Box(-np.inf, np.inf, (), dtype=np.float32),
-            "is_first": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_last": gym.spaces.Box(0, 1, (), dtype=np.bool),
-            "is_terminal": gym.spaces.Box(0, 1, (), dtype=np.bool),
+            "is_first": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_last": gym.spaces.Box(0, 1, (), dtype=bool),
+            "is_terminal": gym.spaces.Box(0, 1, (), dtype=bool),
         }
 
     @property
