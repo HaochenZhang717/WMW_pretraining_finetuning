@@ -13,7 +13,7 @@ class Agent(common.Module):
         self.tfstep = tf.Variable(int(self.step), tf.int64)
         self.wm = WorldModel(config, obs_space, self.act_space, self.tfstep)
 
-    # @tf.function
+    @tf.function
     def train(self, data):
         metrics = {}
         state, outputs, mets = self.wm.train(data)
