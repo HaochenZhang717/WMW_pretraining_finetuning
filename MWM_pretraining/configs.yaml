@@ -32,8 +32,8 @@ defaults:
 
   # MAE
   mask_ratio: 0.75
-  mae: {img_size: 64, patch_size: 8, embed_dim: 1024, depth: 4, num_heads: 4, decoder_embed_dim: 1024, decoder_depth: 3, decoder_num_heads: 4, reward_pred: False, early_conv: True, in_chans: 3}
-  wm_flat_vit: {img_size: 8, patch_size: 1, embed_dim: 1024, depth: 2, num_heads: 8, decoder_embed_dim: 1024, decoder_depth: 2, decoder_num_heads: 8, in_chans: 1024, stoch: 32, discrete: 32}
+  mae: {img_size: 64, patch_size: 8, embed_dim: 256, depth: 4, num_heads: 4, decoder_embed_dim: 256, decoder_depth: 3, decoder_num_heads: 4, reward_pred: False, early_conv: True, in_chans: 3}
+  wm_flat_vit: {img_size: 8, patch_size: 1, embed_dim: 1024, depth: 2, num_heads: 8, decoder_embed_dim: 1024, decoder_depth: 2, decoder_num_heads: 8, in_chans: 256, stoch: 32, discrete: 32}
 
 
   # World Model
