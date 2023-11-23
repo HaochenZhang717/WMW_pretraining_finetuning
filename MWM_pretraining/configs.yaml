@@ -1,8 +1,8 @@
 defaults:
 
   # Train Script
-  logdir: ./finetuning_result/debug
-  load_logdir: /home/hchen/processed_somethingv2/
+  logdir: /nothing
+  load_logdir: /home/hchen/nothing
   seed: 0
   task: dmc_walker_walk
   render_size: [64, 64]
