@@ -50,6 +50,10 @@ Run video pre-training (if you want to run pre-training by yourself):
 python apv_pretraining/train_video.py --logdir {save path} --load_logdir {dataset path consisting of npzs} --configs metaworld_pretrain
 ```
 
+```
+python MWM_pretraining/train_video.py --logdir result/pretraining_somethingv2 --load_logdir /home/hchen/processed_somethingv2/ --configs somethingv2
+```
+
 Run Meta-world experiments:
 
 ```

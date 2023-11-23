@@ -15,6 +15,7 @@ except ImportError:
     pass
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 logging.getLogger().setLevel("ERROR")
 warnings.filterwarnings("ignore", ".*box bound precision lowered.*")
 
@@ -33,7 +34,7 @@ def main():
     configs = yaml.safe_load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
     )
-    parsed, remaining = common.Flags(configs=["defaults"]).parse(known_only=True)
+    parsed, remaining = common.Flags(configs=["somethingv2"]).parse(known_only=True)
     config = common.Config(configs["defaults"])
 
     for name in parsed.configs:
@@ -132,6 +133,9 @@ def main():
 
     train_mae(next(mae_train_dataset))
     train_agent(next(train_dataset))
+
+    agnt.report(next(report_dataset))
+
 
     if (logdir / "variables.pkl").exists():
         agnt.load(logdir / "variables.pkl")

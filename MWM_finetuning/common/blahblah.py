@@ -8,7 +8,6 @@ from tensorflow.keras import initializers as tfki
 from tensorflow_probability import distributions as tfd
 import tensorflow.keras.mixed_precision as prec
 from einops import rearrange
-from collections import defaultdict
 
 import common
 
@@ -248,7 +247,7 @@ class TSSM(common.Module):
         mask = self._cast(mask)
         return mask
 
-    @tf.function
+    # @tf.function
     def observe(self, prev_stoch, action, sample=True):
         '''
         :param prev_stoch: (B,T,N,C)
@@ -290,9 +289,7 @@ class TSSM(common.Module):
             deter = tf.reshape(output, (B, T, -1))
         else:
             deter = output[:, :, -1]
-        #to get the shape right, I put an extra linear here
-        deter = self.get("deter_out", tfkl.Dense, self._hidden)(deter)
-        deter = self._act(deter)
+
         x_tilde = deter
         x_tilde = self.get("img_out", tfkl.Dense, self._hidden)(x_tilde)
         x_tilde = self.get("img_out_norm", NormLayer, self._norm)(x_tilde)
@@ -304,29 +301,15 @@ class TSSM(common.Module):
         return prior
 
     @tf.function
-    def imagine(self, post, traj, context_len=50, temp=None):
-        '''
-        :param post: post of latent space, here we use discrete distribution
-        :param traj: trajectory consisting of action and video, action free does not matter
-        :param context_len: the maximum length of input to TSSM
-        :param temp: a coefficient for sample
-        :return:
-        '''
-        post_stoch = post['stoch']
-        action = traj['action'][:, :post_stoch.shape[1]]
-        imag_length = traj['image'].shape[1] - post_stoch.shape[1]
-        pred_state = defaultdict(list)
-        for t in range(imag_length):
-            pred_prior = self.observe(post_stoch[:, -context_len:], action[:, -context_len:], sample=True)
-            for k, v in pred_prior.items():
-                pred_state[k].append(v[:, -1:])
-            post_stoch = tf.concat([post_stoch, pred_prior['stoch'][:, -1:]], axis=1)
-            action = tf.concat([action, action[:, -1:]], axis=1)
-        for k, v in pred_state.items():
-            pred_state[k] = tf.concat(v, axis=1)
-        # in action-free pretrain mode, we concatenate trivial action to action list
-
-        return pred_state
+    def imagine(self, action, state=None):
+        swap = lambda x: tf.transpose(x, [1, 0] + list(range(2, len(x.shape))))
+        if state is None:
+            state = self.initial(tf.shape(action)[0])
+        assert isinstance(state, dict), state
+        action = swap(action)
+        prior = common.static_scan(self.img_step, action, state)
+        prior = {k: swap(v) for k, v in prior.items()}
+        return prior
 
     def get_feat(self, state):
         stoch = self._cast(state["stoch"])
@@ -346,6 +329,45 @@ class TSSM(common.Module):
             std = tf.cast(std, tf.float32)
             dist = tfd.MultivariateNormalDiag(mean, std)
         return dist
+
+    @tf.function
+    def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
+        # if is_first.any():
+        prev_state, prev_action = tf.nest.map_structure(
+            lambda x: tf.einsum("b,b...->b...", 1.0 - is_first.astype(x.dtype), x),
+            (prev_state, prev_action),
+        )
+        prior = self.img_step(prev_state, prev_action, sample)
+        x = tf.concat([prior[f"deter"], embed], -1)
+        x = self.get("obs_out", tfkl.Dense, self._hidden)(x)
+        x = self.get("obs_out_norm", NormLayer, self._norm)(x)
+        x = self._act(x)
+        stats = self._suff_stats_layer("obs_dist", x)
+        dist = self.get_dist(stats)
+        stoch = dist.sample() if sample else dist.mode()
+        post = {"stoch": stoch, "deter": prior[f"deter"], **stats}
+        return post, prior
+
+    @tf.function
+    def img_step(self, prev_state, prev_action, sample=True):
+        prev_stoch = self._cast(prev_state["stoch"])
+        prev_action = self._cast(prev_action)
+        if self._discrete:
+            shape = prev_stoch.shape[:-2] + [self._stoch * self._discrete]
+            prev_stoch = tf.reshape(prev_stoch, shape)
+        x = tf.concat([prev_stoch, self.fill_action_with_zero(prev_action)], -1)
+        x = self.get("img_in", tfkl.Dense, self._hidden)(x)
+        x = self.get("img_in_norm", NormLayer, self._norm)(x)
+        x, deter = self._cell(x, [prev_state[f"deter"]])
+        deter = deter[0]
+        x = self.get("img_out", tfkl.Dense, self._hidden)(x)
+        x = self.get("img_out_norm", NormLayer, self._norm)(x)
+        x = self._act(x)
+        stats = self._suff_stats_layer(f"img_dist", x)
+        dist = self.get_dist(stats)
+        stoch = dist.sample() if sample else dist.mode()
+        prior = {"stoch": stoch, "deter": deter, **stats}
+        return prior
 
     def _suff_stats_layer(self, name, x):
         if self._discrete:
@@ -588,10 +610,22 @@ class MultiheadAttention(tf.keras.layers.Layer):
         self.dropatt = dropatt
         self.d_model = d_model
 
-        self.qkv_net = tf.keras.layers.Dense(
-            units=3*self.d_inner*self.n_head,
+        self.q_net = tf.keras.layers.Dense(
+            units=self.d_inner*self.n_head,
             use_bias=False,
-            name='qkv_net'
+            name='q_net'
+        )
+
+        self.k_net = tf.keras.layers.Dense(
+            units=self.d_inner*self.n_head,
+            use_bias=False,
+            name='k_net'
+        )
+
+        self.v_net = tf.keras.layers.Dense(
+            units=self.d_inner*self.n_head,
+            use_bias=False,
+            name='v_net'
         )
 
         self.out_net = tf.keras.layers.Dense(
@@ -609,25 +643,29 @@ class MultiheadAttention(tf.keras.layers.Layer):
         self.pre_lnorm = pre_lnorm
 
     @tf.function
-    def call(self, inps, attn_mask=None):
+    def call(self, q, k, v, attn_mask=None):
         '''
-        :param inps: here it refers q, k, and v. it is self-attention
+        :param q: (T-1,B,d_model)
+        :param k: (T-1,B,d_model)
+        :param v: (T-1,B,d_model)
         :param attn_mask: (T-1,T-1)
         :return:
         '''
-        inps = inps.astype(prec.global_policy().compute_dtype)
-        T_q, bsz = inps.shape[:2]
-        T_k, bsz = inps.shape[:2]
+        q = q.astype(prec.global_policy().compute_dtype)
+        k = k.astype(prec.global_policy().compute_dtype)
+        v = v.astype(prec.global_policy().compute_dtype)
+
+        T_q, bsz = q.shape[:2]
+        T_k, bsz = k.shape[:2]
 
         if self.pre_lnorm:
-            w_head_qkv = self.qkv_net(self.layer_norm(inps))
+            w_head_q = self.q_net(self.layer_norm(q))
+            w_head_k = self.k_net(self.layer_norm(k))
+            w_head_v = self.v_net(self.layer_norm(v))
         else:
-            w_head_qkv = self.qkv_net(inps)
-
-        w_head_qkv = tf.reshape(w_head_qkv, (T_q, bsz, 3, -1))
-        w_head_qkv = tf.transpose(w_head_qkv, (2, 0, 1, 3))
-        w_head_q, w_head_k, w_head_v = w_head_qkv[0], w_head_qkv[1], w_head_qkv[2]
-
+            w_head_q = self.q_net(q)
+            w_head_k = self.k_net(k)
+            w_head_v = self.v_net(v)
 
         w_head_q = tf.reshape(w_head_q, (T_q, bsz, self.n_head, self.d_inner))
         w_head_k = tf.reshape(w_head_k, (T_k, bsz, self.n_head, self.d_inner))
@@ -708,15 +746,50 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):
     def __init__(self, d_model, n_head, d_inner, dropout, dropatt, pre_lnorm, d_ff_inner, **kwargs):
         super().__init__(**kwargs)
         self.mah = MultiheadAttention(d_model, n_head, d_inner, dropout, dropatt, pre_lnorm)
-        self.pos_ff = PointwiseFF(d_model, d_ff_inner, dropout, pre_lnorm)
+        self.pos_ff = PointwiseFF( d_model, d_ff_inner, dropout, pre_lnorm)
 
-    @tf.function
+    # @tf.function
     def call(self, inpts, attn_mask=None):
-        src2 = self.mah(inpts, attn_mask=attn_mask)
+        src2 = self.mah(inpts, inpts, inpts, attn_mask=attn_mask)
         src = inpts + src2
         src2 = self.pos_ff(src)
         src = src + src2
         return src
+
+
+# class TransformerEncoder(tf.keras.layers.Layer):
+#     def __init__(self, d_model, n_layers, dropout, last_ln, n_head, d_inner, dropatt, pre_lnorm, d_ff_inner, **kwargs):
+#         super().__init__(**kwargs)
+#         self.d_model = d_model
+#         self.n_layers = n_layers
+#         self.last_ln = last_ln
+#
+#         self.pos_embs = lambda x: positional_embedding(d_model, x)
+#         self.drop = tf.keras.layers.Dropout(dropout,name='drop')
+#
+#     def _generate_square_subsequent_mask(self, T, H, W, device):
+#         N = H * W
+#         mask = tf.linalg.band_part(tf.ones((T, T)), 0, -1).transpose((1, 0))
+#         mask = tf.where(mask==0, -float('1e10'), mask)
+#         mask = tf.where(mask==1, float('0.0'), mask)
+#
+#         mask = tf.repeat(mask, N, axis=0)
+#         mask = tf.repeat(mask, N, axis=1)
+#
+#         mask = torch.repeat_interleave(mask, N, dim=0)
+#         mask = torch.repeat_interleave(mask, N, dim=1)
+#
+#         return mask
+#
+#     def call(self, inputs, *args, **kwargs):
+#         B, T, D, H, W = inputs.shape
+#         attn_mask = self._generate_square_subsequent_mask(T, H, W)
+#         pos_ips = tf.range(T * H * W)
+#         pos_ips = tf.cast(pos_ips, prec.global_policy().compute_dtype)
+#         pos_embs = self.drop(self.pos_embs(pos_ips))
+
+
+
 
 
 def get_act(name):

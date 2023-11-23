@@ -156,9 +156,6 @@ class MaskedViTEncoder(common.Module):
 
         # apply Transformer blocks
         for j in range(self.depth):
-            print('###############')
-            print(j)
-            print('###############')
             x = self.get(
                 f"vit_encoder_block_{j}",
                 ViTBlock,
