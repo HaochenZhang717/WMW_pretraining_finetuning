@@ -1,8 +1,8 @@
 defaults:
 
   # Train Script
-  logdir: /nothing
-  load_logdir: /home/hchen/nothing
+  logdir: ./debug/nothing
+  load_logdir: /home/hchen/apv_remote/pretraining_datasets/rlbench/train_episodes
   seed: 0
   task: dmc_walker_walk
   render_size: [64, 64]
@@ -33,12 +33,12 @@ defaults:
   # MAE
   mask_ratio: 0.75
   mae: {img_size: 64, patch_size: 8, embed_dim: 1024, depth: 4, num_heads: 4, decoder_embed_dim: 1024, decoder_depth: 3, decoder_num_heads: 4, reward_pred: False, early_conv: True, in_chans: 3}
-  wm_flat_vit: {img_size: 8, patch_size: 1, embed_dim: 1024, depth: 2, num_heads: 8, decoder_embed_dim: 1024, decoder_depth: 2, decoder_num_heads: 8, in_chans: 256, stoch: 32, discrete: 32}
+  wm_flat_vit: {img_size: 8, patch_size: 1, embed_dim: 1024, depth: 2, num_heads: 8, decoder_embed_dim: 1024, decoder_depth: 2, decoder_num_heads: 8, in_chans: 1024, stoch: 32, discrete: 32}
 
 
   # World Model
   grad_heads: [decoder]
-  tssm: {action_free: True, hidden: 1024, deter: 1024, stoch: 32, discrete: 32, act: elu, norm: none, std_act: sigmoid2, min_std: 0.1, deter_type: concat_o, n_trans_layers: 6, n_head: 8, d_inner: 64, dropout: 0.1, dropatt: 0.1, pre_lnorm: True, d_ff_inner: 1024}
+  tssm: {action_free: True, hidden: 1024, deter: 1024, stoch: 32, discrete: 32, act: elu, norm: none, std_act: sigmoid2, min_std: 0.1, deter_type: mean_o, n_trans_layers: 6, n_head: 8, d_inner: 64, dropout: 0.1, dropatt: 0.1, pre_lnorm: True, d_ff_inner: 1024}
   loss_scales: { feature: 1.0, kl: 1.0, reward: 1.0, discount: 1.0, proprio: 1.0, mae_reward: 1.0 }
   wmkl: { scale: 1.0 }
   wmkl_minloss: 0.0
@@ -94,9 +94,9 @@ dmc_vision_pretrain:
 
 somethingv2:
   task: dmc_walker_walk
-  replay: {minlen: 50, maxlen: 50}
-  dataset: {batch: 16, length: 50}
-  mae_dataset: {batch: 32, length: 32}
+  replay: {minlen: 25, maxlen: 25}
+  dataset: {batch: 16, length: 25}
+  mae_dataset: {batch: 16, length: 16}
   action_repeat: 1
   steps: 5e7
   log_every: 100

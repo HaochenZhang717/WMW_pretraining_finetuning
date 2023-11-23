@@ -414,9 +414,9 @@ class ViTEncoder(common.Module):
         x = self.get("vit_encoder_norm", norm_layer_factory(self.norm_layer))(x)
         assert x.shape[0] == bitch_size * video_length
         #the way to merge axis=1 of x may be suboptimal, but I follow the way used in WMW paper
-        x = x.mean(1).reshape([bitch_size, video_length, -1])
-        deter = x
-        x = self.get("vit_out", tfkl.Dense, self.embed_dim)(x)
+        embed = x.mean(1).reshape([bitch_size, video_length, -1])
+        deter = embed
+        x = self.get("vit_out", tfkl.Dense, self.embed_dim)(embed)
         x = tf.nn.elu(x)
         stats = self._suff_stats_layer("vit_dist", x)
         dist = self.get_dist(stats)

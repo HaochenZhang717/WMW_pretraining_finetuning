@@ -173,7 +173,6 @@ class RSSM(common.Module):
         return balance * lhs + (1 - balance) * rhs
 
 
-
 class TSSM(common.Module):
     def __init__(
         self,
@@ -288,14 +287,16 @@ class TSSM(common.Module):
         output = tf.reshape(output, (B, T, self._n_trans_layers, -1)) #(B,T,L,D)
         if self._deter_type == 'concat_o':
             deter = tf.reshape(output, (B, T, -1))
+            deter = self.get("deter_out", tfkl.Dense, self._hidden)(deter)
+            deter = self._act(deter)
+        if self._deter_type == 'mean_o':
+            deter = output.mean(axis=2)
         else:
             deter = output[:, :, -1]
-        #to get the shape right, I put an extra linear here
-        deter = self.get("deter_out", tfkl.Dense, self._hidden)(deter)
-        deter = self._act(deter)
+
         x_tilde = deter
-        x_tilde = self.get("img_out", tfkl.Dense, self._hidden)(x_tilde)
-        x_tilde = self.get("img_out_norm", NormLayer, self._norm)(x_tilde)
+        x_tilde = self.get("prior_out", tfkl.Dense, self._hidden)(x_tilde)
+        x_tilde = self.get("prior_out_norm", NormLayer, self._norm)(x_tilde)
         x_tilde = self._act(x_tilde)
         stats = self._suff_stats_layer(f"img_dist", x_tilde)
         dist = self.get_dist(stats)

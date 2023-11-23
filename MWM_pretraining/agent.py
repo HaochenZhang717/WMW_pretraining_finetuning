@@ -13,7 +13,7 @@ class Agent(common.Module):
         self.tfstep = tf.Variable(int(self.step), tf.int64)
         self.wm = WorldModel(config, obs_space, self.act_space, self.tfstep)
 
-    @tf.function
+    # @tf.function
     def train(self, data):
         metrics = {}
         state, outputs, mets = self.wm.train(data)
@@ -99,8 +99,8 @@ class WorldModel(common.Module):
         latent, mask, _ = self.mae_encoder.forward_encoder(videos, m, T)
         feature = latent
         data["feature"] = tf.stop_gradient(feature.astype(tf.float32))
-        data["feature"] = data["feature"].reshape([B, T, feature.shape[-2], feature.shape[-1]])
-        data["feature"] = data["feature"][:, 1:].reshape([B*(T-1), feature.shape[-2], feature.shape[-1]])
+        # data["feature"] = data["feature"].reshape([B, T, feature.shape[-2], feature.shape[-1]])
+        # data["feature"] = data["feature"][:, 1:].reshape([B*(T-1), feature.shape[-2], feature.shape[-1]])
         # Detach features
         feature = tf.stop_gradient(feature)
 
@@ -108,32 +108,15 @@ class WorldModel(common.Module):
         ## Move [CLS] to last position
         feature = tf.concat([feature[:, 1:], feature[:, :1]], axis=1)
         post = self.wm_vit_encoder.forward_encoder(feature, B, T)
+        feat = self.tssm.get_feat(post)
         # TSSM forward
         prior = self.tssm.observe(post["stoch"][:, :-1], data["action"][:, :-1], sample=True)
-        feat = self.tssm.get_feat(prior)
         kl_loss = kl_value = self.tssm.kl_loss(post, prior, self.config.wmkl_balance)
         losses["kl"] = tf.clip_by_value(
             kl_loss * self.config.wmkl.scale, self.config.wmkl_minloss, 100.0
         ).mean()
-
-        # Non-image losses
-        # dists = {}
-        # for name, head in self.heads.items():
-        #     grad_head = name in self.config.grad_heads
-        #     inp = feat if grad_head else tf.stop_gradient(feat)
-        #     out = head(inp)
-        #     out = out if isinstance(out, dict) else {name: out}
-        #     dists.update(out)
-        # for key, dist in dists.items():
-        #     like = tf.cast(dist.log_prob(data[key]), tf.float32)
-        #     likes[key] = like
-        #     losses[key] = -like.mean()
-
         # Feature reconstruction loss
-        feat = tf.reshape(feat, [B * (T-1), 1, -1])
-        # print("================================")
-        # print(feat.shape)
-        # print("================================")
+        feat = tf.reshape(feat, [B * T, 1, -1])
         feature_pred = self.wm_vit_decoder.forward_decoder(feat)
         ## Move [CLS] to first position
         feature_pred = tf.concat([feature_pred[:, -1:], feature_pred[:, :-1]], axis=1)
