@@ -134,7 +134,7 @@ def main():
     train_mae(next(mae_train_dataset))
     train_agent(next(train_dataset))
 
-    agnt.report(next(report_dataset))
+    # agnt.report(next(report_dataset))
 
 
     if (logdir / "variables.pkl").exists():

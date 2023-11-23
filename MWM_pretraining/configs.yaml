@@ -94,9 +94,9 @@ dmc_vision_pretrain:
 
 somethingv2:
   task: dmc_walker_walk
-  replay: {minlen: 25, maxlen: 25}
-  dataset: {batch: 16, length: 25}
-  mae_dataset: {batch: 16, length: 16}
+  replay: {minlen: 50, maxlen: 50}
+  dataset: {batch: 16, length: 50}
+  mae_dataset: {batch: 32, length: 32}
   action_repeat: 1
   steps: 5e7
   log_every: 100
